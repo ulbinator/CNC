@@ -1,0 +1,166 @@
+﻿double Z_MIN = -150;        
+double FEEDRATE_FAST = 400;
+double FEEDRATE_SLOW = 40;
+
+double RETRACT = 2;
+
+double toolOneZPos = 0.0;
+
+Func<int, double> probeToolLength = delegate (int toolIndex)
+{
+  exec.Code("G31 Z" + Z_MIN + "F" + FEEDRATE_FAST);     // Probe fast first.
+  while (exec.IsMoving()) { }
+  exec.Code("G91 G0 Z" + RETRACT);
+  while (exec.IsMoving()) { }
+  exec.Code("G90");
+  while (exec.IsMoving()) { }
+  exec.Code("G31 Z" + Z_MIN + "F" + FEEDRATE_SLOW);     // Probe again slowly for a more accurate reading.
+  while (exec.IsMoving()) { }
+
+  double pos = exec.GetZmachpos();
+
+  exec.Code("G91 G0 Z" + RETRACT);
+  while (exec.IsMoving()) { }
+
+  return pos;
+};
+
+Action<int> fetchTool = delegate (int toolIndex)
+{
+  if (!exec.Ismacrostopped())
+  {
+    exec.Code("M6T" + toolIndex);
+    while (exec.IsMoving()) { }
+  }
+};
+
+Action<int, double> adjustToolLengthOffset = delegate (int toolIndex, double zPos)
+{
+  double offset = -(toolOneZPos - zPos);
+
+  AS3.Setfield(offset, 195 + toolIndex);
+  AS3.Validatefield(195 + toolIndex);
+};
+
+// Set offset for tool 1 to 0.0 .
+adjustToolLengthOffset(1, 0.0);
+
+string ifai = AS3.Getfield(27242);
+double move = Convert.ToDouble(ifai);
+if (move == 55)
+{
+  if (!exec.GetLED(56) || !exec.GetLED(57) || !exec.GetLED(58))
+  {
+    MessageBox.Show("The machine has not yet been homed. Please HOME before executing!");
+    exec.Stop();
+    return;
+  }
+ 
+  if (!AS3.Getcheckboxstate(600))
+  {
+    DialogResult dr = MessageBox.Show("This Macro will automatically adjust the tool offsets for the ATC for a single or multiple tools. Make sure the spindle is positioned over the tool length sensor before proceeding.", "Important!", MessageBoxButtons.OKCancel);
+    if (dr == System.Windows.Forms.DialogResult.Cancel)
+    {
+      MessageBox.Show("Correct the positions and execute the macro again");
+      exec.Stop();
+      return;
+    }
+  }
+
+  double numTools = Convert.ToInt32(exec.Question("How many tools are in the ATC? Enter 1 to adjust a single tool."));
+  if (numTools <= 0)
+  {
+    MessageBox.Show("Number must be greater than 0.");
+    exec.Stop();
+    return;
+  }
+
+  if (numTools == 1)
+  {
+    int tool = Convert.ToInt32(exec.Question("Which tools offset do you want to adjust the offset? Enter the tool number."));
+    if (tool <= 1)
+    {
+      MessageBox.Show("Number must be greater than 1. Tool 1 always has offset 0.");
+      exec.Stop();
+      return;
+    } 
+    else {  
+      fetchTool(1);
+      toolOneZPos = probeToolLength(1);
+
+      fetchTool(tool);
+      adjustToolLengthOffset(tool, probeToolLength(tool));
+
+      exec.Wait(100);
+      exec.Code("G43 H" + tool);
+      exec.Wait(100);
+    }
+  }
+
+  if (numTools > 1)
+  {
+    DialogResult dr = MessageBox.Show("The Macro will adjust the offsets for " + numTools + " tools (this will not change the zero value). Press OK to proceed.", "Important!", MessageBoxButtons.OKCancel);
+    if (dr == System.Windows.Forms.DialogResult.Cancel)
+    {
+      MessageBox.Show("Correct the positions and execute the macro again");
+      exec.Stop();
+      return;
+    }
+
+    int current = 1;
+
+    fetchTool(current);
+    toolOneZPos = probeToolLength(current);
+    current++;
+
+    while (current <= numTools)
+    {
+      fetchTool(current);
+      adjustToolLengthOffset(current, probeToolLength(current));
+
+      current++;
+
+      exec.Wait(100);
+
+      // Read offset for the next tool (this is a bit weird, copied from original script, this may not be needed).
+      exec.Code("G43 H" + current);
+      exec.Wait(100);
+    }
+  }
+
+  if (!exec.Ismacrostopped())
+  {
+    DialogResult dr = MessageBox.Show(numTools + " Tools offseta are calculated. Do you want to save the offsets in the current profile? If you press Cancel the offsets are only applied but not saved.", "Important!", MessageBoxButtons.OKCancel);
+    if (dr == System.Windows.Forms.DialogResult.Cancel)
+    {
+      exec.Callbutton(168);
+      exec.Wait(200);
+
+      MessageBox.Show("Settings were applied but not saved. Returning to tool 1.");
+
+      fetchTool(1);
+      
+      exec.Stop();
+      return;
+    }
+    else
+    {
+      exec.Callbutton(168);
+      exec.Callbutton(167);
+      exec.Wait(200);
+
+      MessageBox.Show("Settings were applied and saved in the current profile. Returning to tool 1.");
+
+      fetchTool(1);
+
+      exec.Stop();
+      return;
+    }
+  }
+  else
+  {
+    exec.StopWithDeccel();
+    exec.Wait(200);
+    MessageBox.Show("Macro interrupted by user!");
+  }
+}
